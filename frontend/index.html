@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Movie Recommender </title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f7f9fc;
+      color: #202124;
+    }
+
+    .container {
+      max-width: 920px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e3e7ee;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+    }
+
+    p.note {
+      margin: 0 0 20px;
+      color: #5f6368;
+    }
+
+    form {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 150px;
+      font-size: 14px;
+    }
+
+    input {
+      border: 1px solid #c7ced9;
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 14px;
+      min-width: 120px;
+    }
+
+    select {
+      border: 1px solid #c7ced9;
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 14px;
+      min-width: 140px;
+      background: #fff;
+    }
+
+    button {
+      align-self: flex-end;
+      height: 40px;
+      border: none;
+      border-radius: 8px;
+      padding: 0 16px;
+      background: #1a73e8;
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.7;
+    }
+
+    #status {
+      min-height: 22px;
+      margin-bottom: 12px;
+      font-size: 14px;
+    }
+
+    #status.error {
+      color: #b00020;
+    }
+
+    #status.success {
+      color: #0b8043;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+    }
+
+    th, td {
+      border: 1px solid #e3e7ee;
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      background: #f3f6fb;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Movie Recommender MVP</h1>
+    <p class="note">Input <code>userId</code>, <code>topN</code>, and model to query recommendations.</p>
+
+    <form id="recommend-form">
+      <label for="user-id">
+        userId
+        <input id="user-id" type="number" min="1" step="1" value="1" required />
+      </label>
+
+      <label for="top-n">
+        topN
+        <input id="top-n" type="number" min="1" max="50" step="1" value="10" required />
+      </label>
+
+      <label for="model-name">
+        model
+        <select id="model-name" required>
+          <option value="svd">svd</option>
+          <option value="user_cf">user_cf</option>
+          <option value="item_cf">item_cf</option>
+          <option value="popularity">popularity</option>
+        </select>
+      </label>
+
+      <button id="submit-btn" type="submit">Get Recommendations</button>
+    </form>
+
+    <div id="status" role="status" aria-live="polite"></div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>movieId</th>
+          <th>title</th>
+          <th>genres</th>
+        </tr>
+      </thead>
+      <tbody id="results-body">
+        <tr>
+          <td colspan="3">No data yet.</td>
+        </tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script>
+    const form = document.getElementById("recommend-form");
+    const userIdInput = document.getElementById("user-id");
+    const topNInput = document.getElementById("top-n");
+    const modelNameSelect = document.getElementById("model-name");
+    const submitBtn = document.getElementById("submit-btn");
+    const statusEl = document.getElementById("status");
+    const resultsBody = document.getElementById("results-body");
+
+    function setStatus(text, type) {
+      statusEl.textContent = text;
+      statusEl.className = type || "";
+    }
+
+    function renderEmpty(message) {
+      resultsBody.innerHTML = "";
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 3;
+      cell.textContent = message;
+      row.appendChild(cell);
+      resultsBody.appendChild(row);
+    }
+
+    function renderResults(recommendations) {
+      resultsBody.innerHTML = "";
+      if (!recommendations || recommendations.length === 0) {
+        renderEmpty("No recommendations found.");
+        return;
+      }
+
+      recommendations.forEach((item) => {
+        const row = document.createElement("tr");
+
+        row.innerHTML = `
+          <td>${item.movieId ?? ""}</td>
+          <td>${item.title ?? ""}</td>
+          <td>${item.genres ?? ""}</td>
+        `;
+
+        resultsBody.appendChild(row);
+      });
+    }
+
+    async function fetchRecommendations(userId, topN, modelName) {
+      const query = new URLSearchParams({
+        user_id: String(userId),
+        top_n: String(topN),
+        model_name: String(modelName),
+      });
+
+      const response = await fetch(`/api/recommendations?${query.toString()}`);
+      const payload = await response.json();
+
+      if (!response.ok) {
+        const detail = payload && payload.detail ? payload.detail : "Request failed.";
+        throw new Error(detail);
+      }
+
+      return payload;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      const userId = Number(userIdInput.value);
+      const topN = Number(topNInput.value);
+      const modelName = modelNameSelect.value;
+
+      if (!Number.isInteger(userId) || userId <= 0) {
+        setStatus("userId must be a positive integer.", "error");
+        renderEmpty("Invalid input.");
+        return;
+      }
+
+      if (!Number.isInteger(topN) || topN < 1 || topN > 50) {
+        setStatus("topN must be an integer between 1 and 50.", "error");
+        renderEmpty("Invalid input.");
+        return;
+      }
+
+      submitBtn.disabled = true;
+      setStatus("Loading recommendations...", "");
+
+      try {
+        const data = await fetchRecommendations(userId, topN, modelName);
+        renderResults(data.recommendations);
+        setStatus(
+          `Loaded ${Array.isArray(data.recommendations) ? data.recommendations.length : 0} recommendations for user ${data.user_id} with model ${data.model_name}.`,
+          "success"
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unexpected error.";
+        setStatus(message, "error");
+        renderEmpty("Request failed.");
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

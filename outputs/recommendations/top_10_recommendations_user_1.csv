@@ -1,0 +1,11 @@
+movieId,predicted_rating,title,genres,movie_year,clean_title,genres_clean,genre_list
+858,4.656476584673058,"Godfather, The (1972)",Crime|Drama,1972.0,"Godfather, The",Crime|Drama,"['Crime', 'Drama']"
+2683,4.598517095285933,Austin Powers: The Spy Who Shagged Me (1999),Action|Adventure|Comedy,1999.0,Austin Powers: The Spy Who Shagged Me,Action|Adventure|Comedy,"['Action', 'Adventure', 'Comedy']"
+589,4.585693943394609,Terminator 2: Judgment Day (1991),Action|Sci-Fi,1991.0,Terminator 2: Judgment Day,Action|Sci-Fi,"['Action', 'Sci-Fi']"
+344,4.565994496667312,Ace Ventura: Pet Detective (1994),Comedy,1994.0,Ace Ventura: Pet Detective,Comedy,['Comedy']
+2804,4.5576946683312745,"Christmas Story, A (1983)",Children|Comedy,1983.0,"Christmas Story, A",Children|Comedy,"['Children', 'Comedy']"
+1653,4.538125789254728,Gattaca (1997),Drama|Sci-Fi|Thriller,1997.0,Gattaca,Drama|Sci-Fi|Thriller,"['Drama', 'Sci-Fi', 'Thriller']"
+318,4.535775643634461,"Shawshank Redemption, The (1994)",Crime|Drama,1994.0,"Shawshank Redemption, The",Crime|Drama,"['Crime', 'Drama']"
+1387,4.535599656296476,Jaws (1975),Action|Horror,1975.0,Jaws,Action|Horror,"['Action', 'Horror']"
+2791,4.530789585497391,Airplane! (1980),Comedy,1980.0,Airplane!,Comedy,['Comedy']
+541,4.526208137737795,Blade Runner (1982),Action|Sci-Fi|Thriller,1982.0,Blade Runner,Action|Sci-Fi|Thriller,"['Action', 'Sci-Fi', 'Thriller']"

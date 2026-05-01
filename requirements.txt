@@ -1,0 +1,11 @@
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+scipy
+joblib
+fastapi
+uvicorn
+# Optional, only needed for neural embedding recommender:
+tensorflow

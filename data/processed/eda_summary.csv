@@ -1,0 +1,9 @@
+metric,value
+Number of users,610.0
+Number of movies with ratings,9724.0
+Number of movies in metadata,9742.0
+Number of ratings,100836.0
+Number of tags,3683.0
+Average rating,3.5016
+Median rating,3.5
+Rating sparsity,0.983

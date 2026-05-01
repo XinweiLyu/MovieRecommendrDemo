@@ -1,0 +1,11 @@
+metric,value
+ratings_rows,100836.0
+movies_rows,9742.0
+tags_rows,3683.0
+links_rows,9742.0
+num_users,610.0
+num_rated_movies,9724.0
+num_movies_metadata,9742.0
+missing_tmdbId,8.0
+missing_movie_year,13.0
+global_average_rating,3.5016
