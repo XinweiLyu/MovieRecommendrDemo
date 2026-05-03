@@ -46,6 +46,24 @@ class SVDRecommender:
         pred = self.user_means.loc[user_id] + pred_centered
         return clip_rating(pred)
 
+    def predict_many(self, user_id: int, movie_ids: list[int]) -> np.ndarray:
+        if user_id not in self.user_to_idx:
+            return np.full(len(movie_ids), float(self.global_mean), dtype=float)
+
+        user_idx = self.user_to_idx[user_id]
+        user_factor = self.user_factors[user_idx]
+        user_mean = float(self.user_means.loc[user_id])
+        predictions = np.full(len(movie_ids), float(self.global_mean), dtype=float)
+        known_mask = np.array([movie_id in self.movie_to_idx for movie_id in movie_ids], dtype=bool)
+        if not np.any(known_mask):
+            return predictions
+
+        known_movie_ids = [movie_ids[idx] for idx, known in enumerate(known_mask) if known]
+        movie_indices = np.array([self.movie_to_idx[movie_id] for movie_id in known_movie_ids], dtype=int)
+        pred_centered = self.movie_factors[movie_indices] @ user_factor
+        predictions[known_mask] = np.clip(user_mean + pred_centered, RATING_MIN, RATING_MAX)
+        return predictions
+
 
 class UserBasedCF:
     def __init__(self, k: int = 20):
@@ -55,31 +73,67 @@ class UserBasedCF:
         self.user_similarity_df = None
 
     def predict_one(self, user_id: int, movie_id: int) -> float:
-        if user_id not in self.train_matrix.index or movie_id not in self.train_matrix.columns:
-            return float(self.global_mean)
+        return float(self.predict_many(user_id, [movie_id])[0])
 
-        sim_scores = self.user_similarity_df[user_id].drop(labels=[user_id], errors="ignore")
-        movie_ratings = self.train_matrix[movie_id]
-        valid_users = movie_ratings.dropna().index
+    def _ensure_fast_cache(self) -> None:
+        if getattr(self, "_fast_cache_ready", False):
+            return
+        self._user_ids = np.array(self.train_matrix.index, dtype=int)
+        self._movie_ids = np.array(self.train_matrix.columns, dtype=int)
+        self._user_to_pos = {int(user_id): idx for idx, user_id in enumerate(self._user_ids)}
+        self._movie_to_pos = {int(movie_id): idx for idx, movie_id in enumerate(self._movie_ids)}
+        self._train_matrix_values = self.train_matrix.to_numpy(dtype=np.float32, copy=False)
+        self._user_similarity_values = self.user_similarity_df.to_numpy(dtype=np.float32, copy=False)
+        self._fast_cache_ready = True
 
-        if len(valid_users) == 0:
-            return float(self.global_mean)
+    def predict_many(self, user_id: int, movie_ids: list[int]) -> np.ndarray:
+        self._ensure_fast_cache()
+        predictions = np.full(len(movie_ids), float(self.global_mean), dtype=float)
 
-        sim_scores = sim_scores.loc[sim_scores.index.intersection(valid_users)]
-        movie_ratings = movie_ratings.loc[sim_scores.index]
+        user_pos = self._user_to_pos.get(int(user_id))
+        if user_pos is None:
+            return predictions
 
-        if len(sim_scores) == 0:
-            return float(self.global_mean)
+        candidate_positions = np.array([self._movie_to_pos.get(int(movie_id), -1) for movie_id in movie_ids], dtype=int)
+        known_mask = candidate_positions >= 0
+        if not np.any(known_mask):
+            return predictions
 
-        top_users = sim_scores.sort_values(ascending=False).head(self.k).index
-        top_sim = sim_scores.loc[top_users]
-        top_ratings = movie_ratings.loc[top_users]
+        known_candidate_positions = candidate_positions[known_mask]
+        ratings_sub = self._train_matrix_values[:, known_candidate_positions]  # (num_users, num_candidates)
+        valid_mask = ~np.isnan(ratings_sub)
+        if not np.any(valid_mask):
+            return predictions
 
-        denom = np.abs(top_sim).sum()
-        if denom == 0:
-            return float(self.global_mean)
+        sim_scores = self._user_similarity_values[user_pos].astype(np.float32, copy=True)
+        sim_scores[user_pos] = -np.inf  # exclude self-neighbor
 
-        return clip_rating(np.dot(top_sim, top_ratings) / denom)
+        # Candidate-wise user similarities; invalid raters are masked out.
+        sim_matrix = np.where(valid_mask.T, sim_scores[None, :], -np.inf)  # (num_candidates, num_users)
+        ratings_matrix = ratings_sub.T.astype(np.float32, copy=False)  # (num_candidates, num_users)
+
+        k = min(self.k, sim_matrix.shape[1])
+        if k <= 0:
+            return predictions
+
+        if k < sim_matrix.shape[1]:
+            top_idx = np.argpartition(-sim_matrix, kth=k - 1, axis=1)[:, :k]
+            top_sim = np.take_along_axis(sim_matrix, top_idx, axis=1)
+            top_ratings = np.take_along_axis(ratings_matrix, top_idx, axis=1)
+        else:
+            top_sim = sim_matrix
+            top_ratings = ratings_matrix
+
+        invalid = ~np.isfinite(top_sim)
+        top_sim = np.where(invalid, 0.0, top_sim)
+        top_ratings = np.where(invalid, 0.0, top_ratings)
+
+        denom = np.abs(top_sim).sum(axis=1)
+        weighted_sum = (top_sim * top_ratings).sum(axis=1)
+        known_predictions = np.full(len(known_candidate_positions), float(self.global_mean), dtype=float)
+        np.divide(weighted_sum, denom, out=known_predictions, where=denom != 0)
+        predictions[known_mask] = np.clip(known_predictions, RATING_MIN, RATING_MAX)
+        return predictions
 
 
 class ItemBasedCF:
@@ -90,29 +144,61 @@ class ItemBasedCF:
         self.item_similarity_df = None
 
     def predict_one(self, user_id: int, movie_id: int) -> float:
-        if user_id not in self.train_matrix.index or movie_id not in self.item_similarity_df.index:
-            return float(self.global_mean)
+        return float(self.predict_many(user_id, [movie_id])[0])
 
-        user_ratings = self.train_matrix.loc[user_id].dropna()
-        if len(user_ratings) == 0:
-            return float(self.global_mean)
+    def _ensure_fast_cache(self) -> None:
+        if getattr(self, "_fast_cache_ready", False):
+            return
+        self._user_ids = np.array(self.train_matrix.index, dtype=int)
+        self._movie_ids = np.array(self.train_matrix.columns, dtype=int)
+        self._user_to_pos = {int(user_id): idx for idx, user_id in enumerate(self._user_ids)}
+        self._movie_to_pos = {int(movie_id): idx for idx, movie_id in enumerate(self._movie_ids)}
+        self._train_matrix_values = self.train_matrix.to_numpy(dtype=np.float32, copy=False)
+        self._item_similarity_values = self.item_similarity_df.to_numpy(dtype=np.float32, copy=False)
+        self._fast_cache_ready = True
 
-        rated_movies = user_ratings.index.intersection(self.item_similarity_df.columns)
-        sim_scores = self.item_similarity_df.loc[movie_id, rated_movies]
-        sim_scores = sim_scores.drop(labels=[movie_id], errors="ignore")
+    def predict_many(self, user_id: int, movie_ids: list[int]) -> np.ndarray:
+        self._ensure_fast_cache()
+        predictions = np.full(len(movie_ids), float(self.global_mean), dtype=float)
 
-        if len(sim_scores) == 0:
-            return float(self.global_mean)
+        user_pos = self._user_to_pos.get(int(user_id))
+        if user_pos is None:
+            return predictions
 
-        top_items = sim_scores.sort_values(ascending=False).head(self.k).index
-        top_sim = sim_scores.loc[top_items]
-        top_ratings = user_ratings.loc[top_items]
+        user_row = self._train_matrix_values[user_pos]
+        rated_positions = np.flatnonzero(~np.isnan(user_row))
+        if rated_positions.size == 0:
+            return predictions
 
-        denom = np.abs(top_sim).sum()
-        if denom == 0:
-            return float(self.global_mean)
+        rated_values = user_row[rated_positions]
+        candidate_positions = np.array([self._movie_to_pos.get(int(movie_id), -1) for movie_id in movie_ids], dtype=int)
+        known_mask = candidate_positions >= 0
+        if not np.any(known_mask):
+            return predictions
 
-        return clip_rating(np.dot(top_sim, top_ratings) / denom)
+        known_candidate_positions = candidate_positions[known_mask]
+        similarity_matrix = self._item_similarity_values[known_candidate_positions[:, None], rated_positions[None, :]]
+        if similarity_matrix.size == 0:
+            return predictions
+
+        k = min(self.k, similarity_matrix.shape[1])
+        if k <= 0:
+            return predictions
+
+        if k < similarity_matrix.shape[1]:
+            top_idx = np.argpartition(-similarity_matrix, kth=k - 1, axis=1)[:, :k]
+            top_sim = np.take_along_axis(similarity_matrix, top_idx, axis=1)
+            top_ratings = rated_values[top_idx]
+        else:
+            top_sim = similarity_matrix
+            top_ratings = np.broadcast_to(rated_values, top_sim.shape)
+
+        denom = np.abs(top_sim).sum(axis=1)
+        weighted_sum = (top_sim * top_ratings).sum(axis=1)
+        known_predictions = np.full(len(known_candidate_positions), float(self.global_mean), dtype=float)
+        np.divide(weighted_sum, denom, out=known_predictions, where=denom != 0)
+        predictions[known_mask] = np.clip(known_predictions, RATING_MIN, RATING_MAX)
+        return predictions
 
 
 class PopularityBaseline:
@@ -122,6 +208,9 @@ class PopularityBaseline:
 
     def predict_one(self, user_id: int, movie_id: int) -> float:
         return clip_rating(self.movie_mean.get(movie_id, self.global_mean))
+
+    def predict_many(self, user_id: int, movie_ids: list[int]) -> np.ndarray:
+        return np.array([clip_rating(self.movie_mean.get(movie_id, self.global_mean)) for movie_id in movie_ids], dtype=float)
 
 
 setattr(__main__, "SVDRecommender", SVDRecommender)
@@ -236,7 +325,7 @@ class RecommendationService:
         rated_movies = set(self.ratings.loc[self.ratings["userId"] == user_id, "movieId"].unique())
         candidate_movies = [int(movie_id) for movie_id in all_movie_ids if movie_id not in rated_movies]
 
-        if model_name == "embedding" and hasattr(model, "predict_many"):
+        if hasattr(model, "predict_many"):
             pred_scores = model.predict_many(user_id, candidate_movies)
             predictions = list(zip(candidate_movies, pred_scores.tolist()))
         else:
