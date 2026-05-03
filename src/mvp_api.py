@@ -138,12 +138,81 @@ MODEL_FILES: dict[str, str] = {
 }
 
 
+class EmbeddingRecommenderAdapter:
+    def __init__(self, model: Any, user_encoder: Any, movie_encoder: Any, fallback: float):
+        self.model = model
+        self.user_encoder = user_encoder
+        self.movie_encoder = movie_encoder
+        self.fallback = fallback
+
+    def predict_one(self, user_id: int, movie_id: int) -> float:
+        # Unknown IDs are possible for cold-start requests.
+        if user_id not in self.user_encoder.classes_ or movie_id not in self.movie_encoder.classes_:
+            return float(self.fallback)
+
+        user_idx = int(self.user_encoder.transform([user_id])[0])
+        movie_idx = int(self.movie_encoder.transform([movie_id])[0])
+        pred = self.model.predict([np.array([user_idx]), np.array([movie_idx])], verbose=0).flatten()[0]
+        return clip_rating(float(pred))
+
+    def predict_many(self, user_id: int, movie_ids: list[int]) -> np.ndarray:
+        if user_id not in self.user_encoder.classes_:
+            return np.full(len(movie_ids), float(self.fallback), dtype=float)
+
+        user_idx = int(self.user_encoder.transform([user_id])[0])
+        movie_id_arr = np.array(movie_ids, dtype=int)
+        known_mask = np.isin(movie_id_arr, self.movie_encoder.classes_)
+        predictions = np.full(len(movie_ids), float(self.fallback), dtype=float)
+        if not np.any(known_mask):
+            return predictions
+
+        known_movie_ids = movie_id_arr[known_mask]
+        movie_indices = self.movie_encoder.transform(known_movie_ids).astype(int)
+        user_indices = np.full(len(known_movie_ids), user_idx, dtype=int)
+        known_preds = self.model.predict([user_indices, movie_indices], verbose=0).flatten()
+        predictions[known_mask] = np.clip(known_preds, RATING_MIN, RATING_MAX)
+        return predictions
+
+
+def try_load_embedding_model(fallback: float) -> tuple[Any | None, str | None]:
+    model_path = MODEL_DIR / "embedding_recommender.keras"
+    user_encoder_path = MODEL_DIR / "user_encoder.joblib"
+    movie_encoder_path = MODEL_DIR / "movie_encoder.joblib"
+    if not (model_path.exists() and user_encoder_path.exists() and movie_encoder_path.exists()):
+        return None, (
+            "Missing embedding artifacts. Required files: "
+            "embedding_recommender.keras, user_encoder.joblib, movie_encoder.joblib"
+        )
+
+    try:
+        import tensorflow as tf
+    except Exception as exc:
+        return None, f"Failed to import TensorFlow: {exc}"
+
+    try:
+        model = tf.keras.models.load_model(model_path)
+        user_encoder = load(user_encoder_path)
+        movie_encoder = load(movie_encoder_path)
+        return (
+            EmbeddingRecommenderAdapter(
+                model=model,
+                user_encoder=user_encoder,
+                movie_encoder=movie_encoder,
+                fallback=fallback,
+            ),
+            None,
+        )
+    except Exception as exc:
+        return None, f"Failed to load embedding model artifacts: {exc}"
+
+
 @dataclass
 class RecommendationService:
     models: dict[str, Any] | None = None
     movies: pd.DataFrame | None = None
     ratings: pd.DataFrame | None = None
     init_error: str | None = None
+    model_load_errors: dict[str, str] | None = None
 
     @property
     def available_models(self) -> tuple[str, ...]:
@@ -167,10 +236,14 @@ class RecommendationService:
         rated_movies = set(self.ratings.loc[self.ratings["userId"] == user_id, "movieId"].unique())
         candidate_movies = [int(movie_id) for movie_id in all_movie_ids if movie_id not in rated_movies]
 
-        predictions = []
-        for movie_id in candidate_movies:
-            pred_rating = float(model.predict_one(user_id, movie_id))
-            predictions.append((movie_id, pred_rating))
+        if model_name == "embedding" and hasattr(model, "predict_many"):
+            pred_scores = model.predict_many(user_id, candidate_movies)
+            predictions = list(zip(candidate_movies, pred_scores.tolist()))
+        else:
+            predictions = []
+            for movie_id in candidate_movies:
+                pred_rating = float(model.predict_one(user_id, movie_id))
+                predictions.append((movie_id, pred_rating))
 
         recommendations = pd.DataFrame(predictions, columns=["movieId", "predicted_rating"])
         recommendations = recommendations.merge(self.movies, on="movieId", how="left")
@@ -197,20 +270,30 @@ def init_recommendation_service() -> None:
             service.movies = pd.read_csv(PROCESSED_DATA_DIR / "movies_clean.csv")
             service.ratings = pd.read_csv(PROCESSED_DATA_DIR / "ratings_clean.csv")
             loaded_models: dict[str, Any] = {}
+            model_load_errors: dict[str, str] = {}
             for model_name, model_file in MODEL_FILES.items():
                 model_path = MODEL_DIR / model_file
                 if model_path.exists():
                     loaded_models[model_name] = load(model_path)
+
+            embedding_model, embedding_error = try_load_embedding_model(fallback=float(service.ratings["rating"].mean()))
+            if embedding_model is not None:
+                loaded_models["embedding"] = embedding_model
+            elif embedding_error is not None:
+                model_load_errors["embedding"] = embedding_error
+
             if not loaded_models:
                 raise FileNotFoundError(
                     f"No model file found under {MODEL_DIR}. Expected one of: {', '.join(MODEL_FILES.values())}"
                 )
             service.models = loaded_models
             service.init_error = None
+            service.model_load_errors = model_load_errors
         except Exception as exc:
             service.models = None
             service.movies = None
             service.ratings = None
+            service.model_load_errors = None
             service.init_error = (
                 "Failed to initialize recommendation service. "
                 "Please run the training pipeline first and ensure model/data files exist. "
@@ -242,7 +325,12 @@ def get_recommendations(
     try:
         if model_name not in service.available_models:
             available_str = ", ".join(service.available_models)
-            raise HTTPException(status_code=422, detail=f"model_name must be one of: {available_str}")
+            detail = f"model_name must be one of: {available_str}"
+            if model_name == "embedding":
+                embedding_reason = (service.model_load_errors or {}).get("embedding")
+                if embedding_reason:
+                    detail = f"{detail}. embedding unavailable: {embedding_reason}"
+            raise HTTPException(status_code=422, detail=detail)
         recommendations = service.recommend(user_id=user_id, top_n=top_n, model_name=model_name)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
